@@ -87,12 +87,24 @@ jobs:
       - name: Install Android NDK
         if: matrix.comp == 'ndk'
         uses: nttld/setup-ndk@v1
+        id: setup-ndk
         with:
           ndk-version: r25c
-          add-to-path: true
+          add-to-path: false
 
       - name: Build
+        env:
+          NDK_PATH: ${{ steps.setup-ndk.outputs.ndk-path }}
         run: |
+          if [ "${{ matrix.comp }}" = "ndk" ]; then
+            NDK_BIN="${NDK_PATH}/toolchains/llvm/prebuilt/linux-x86_64/bin"
+            export PATH="${NDK_BIN}:${PATH}"
+            if ! command -v aarch64-linux-android21-clang++ >/dev/null; then
+              echo "NDK bin contents:"
+              ls "${NDK_BIN}"
+              exit 1
+            fi
+          fi
           jobs=$(nproc 2>/dev/null || sysctl -n hw.ncpu)
           make -j"$jobs" build ARCH=${{ matrix.arch }} COMP=${{ matrix.comp }} EXE=${{ matrix.exe }}
           make strip ARCH=${{ matrix.arch }} COMP=${{ matrix.comp }} EXE=${{ matrix.exe }} STRIP=${{ matrix.strip }}
@@ -105,7 +117,7 @@ jobs:
   package:
     name: Package binaries
     needs: build
-    if: github.event_name != 'pull_request'
+    if: ${{ !cancelled() && github.event_name != 'pull_request' }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
