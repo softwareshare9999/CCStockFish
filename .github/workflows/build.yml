@@ -1,0 +1,176 @@
+name: Build
+
+on:
+  push:
+    branches: [main, master]
+    tags: ["v*"]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: ${{ matrix.name }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: Windows AVX2
+            os: ubuntu-latest
+            arch: x86-64-avx2
+            comp: mingw
+            exe: CCStockfish-windows-x86-64-avx2.exe
+            strip: x86_64-w64-mingw32-strip
+          - name: Windows AVX512
+            os: ubuntu-latest
+            arch: x86-64-avx512
+            comp: mingw
+            exe: CCStockfish-windows-x86-64-avx512.exe
+            strip: x86_64-w64-mingw32-strip
+          - name: Windows AVXVNNI
+            os: ubuntu-latest
+            arch: x86-64-avxvnni
+            comp: mingw
+            exe: CCStockfish-windows-x86-64-avxvnni.exe
+            strip: x86_64-w64-mingw32-strip
+          - name: Windows BMI2
+            os: ubuntu-latest
+            arch: x86-64-bmi2
+            comp: mingw
+            exe: CCStockfish-windows-x86-64-bmi2.exe
+            strip: x86_64-w64-mingw32-strip
+          - name: Windows VNNI512
+            os: ubuntu-latest
+            arch: x86-64-vnni512
+            comp: mingw
+            exe: CCStockfish-windows-x86-64-vnni512.exe
+            strip: x86_64-w64-mingw32-strip
+          - name: Linux
+            os: ubuntu-latest
+            arch: x86-64-avx2
+            comp: gcc
+            exe: CCStockfish-linux-x86-64
+            strip: strip
+          - name: macOS
+            os: macos-14
+            arch: apple-silicon
+            comp: clang
+            exe: CCStockfish-macos-apple-silicon
+            strip: strip
+          - name: Android
+            os: ubuntu-latest
+            arch: armv8
+            comp: ndk
+            exe: CCStockfish-android-armv8
+            strip: llvm-strip
+
+    defaults:
+      run:
+        working-directory: src
+        shell: bash
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install MinGW
+        if: matrix.comp == 'mingw'
+        working-directory: .
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y g++-mingw-w64-x86-64
+          sudo update-alternatives --set x86_64-w64-mingw32-g++ /usr/bin/x86_64-w64-mingw32-g++-posix
+          sudo update-alternatives --set x86_64-w64-mingw32-gcc /usr/bin/x86_64-w64-mingw32-gcc-posix
+
+      - name: Install Android NDK
+        if: matrix.comp == 'ndk'
+        uses: nttld/setup-ndk@v1
+        with:
+          ndk-version: r25c
+          add-to-path: true
+
+      - name: Build
+        run: |
+          jobs=$(nproc 2>/dev/null || sysctl -n hw.ncpu)
+          make -j"$jobs" build ARCH=${{ matrix.arch }} COMP=${{ matrix.comp }} EXE=${{ matrix.exe }}
+          make strip ARCH=${{ matrix.arch }} COMP=${{ matrix.comp }} EXE=${{ matrix.exe }} STRIP=${{ matrix.strip }}
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.exe }}
+          path: src/${{ matrix.exe }}
+
+  package:
+    name: Package binaries
+    needs: build
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Download entry.nnue
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          mkdir -p dist
+          for i in $(seq 1 12); do
+            if gh release download nets --pattern entry.nnue --repo "${{ github.repository }}" --dir dist; then
+              echo "Downloaded entry.nnue"
+              exit 0
+            fi
+            echo "Waiting for the nets release (attempt $i)..."
+            sleep 15
+          done
+          echo "entry.nnue is not in the nets release yet; packaging binaries only"
+
+      - name: Zip each binary with the network file
+        run: |
+          mkdir -p packages
+          for dir in artifacts/*; do
+            [ -d "$dir" ] || continue
+            name=$(basename "$dir")
+            mkdir -p "packages/$name"
+            cp "$dir"/* "packages/$name/"
+            if [ -f dist/entry.nnue ]; then
+              cp dist/entry.nnue "packages/$name/"
+            fi
+            cp Copying.txt README.md AUTHORS "packages/$name/" 2>/dev/null || true
+            (cd "packages/$name" && zip -9 "../${name}.zip" ./*)
+          done
+          ls -la packages
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: CCStockfish-binaries
+          path: packages/*.zip
+
+      - name: Publish tagged release
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: packages/*.zip
+          generate_release_notes: true
+          body: |
+            Prebuilt CCStockfish binaries. Put `entry.nnue` in the same folder as the engine (included in each zip).
+
+      - name: Publish development builds
+        if: github.ref == 'refs/heads/main' || github.event_name == 'workflow_dispatch'
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: dev-latest
+          name: Development builds
+          prerelease: true
+          files: packages/*.zip
+          body: |
+            Automated builds from `${{ github.sha }}`.
+
+            Each zip contains the engine binary and `entry.nnue` (required at runtime).
+
+            Windows variants: avx2, avx512, avxvnni, bmi2, vnni512.
+            Other platforms: one binary each (Linux x86-64 AVX2, macOS Apple Silicon, Android armv8).

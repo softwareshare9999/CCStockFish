@@ -1,9 +1,15 @@
 # Files from build
 **/*.o
 **/*.s
+**/*.exe
+**/.depend
+**/*.res
+**/*.lto_wrapper_args
+**/*.ltrans*
+**/*.wpa.args.*
+*.code-workspace
 
-
-# Neural network for the NNUE evaluation
+# Neural network for the NNUE evaluation (runtime file; shipped via the nets release)
 **/*.nnue
 CCStockFish/
 tests/
